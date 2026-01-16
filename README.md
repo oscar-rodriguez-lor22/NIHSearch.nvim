@@ -1,1 +1,1 @@
-# pubsearch.nvim
+# NIHSearch.nvim
