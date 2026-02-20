@@ -1,0 +1,6 @@
+biopython==1.86
+greenlet==3.3.0
+msgpack==1.1.2
+numpy==2.4.1
+pynvim==0.6.0
+typing_extensions==4.15.0
