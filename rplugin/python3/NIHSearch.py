@@ -25,6 +25,21 @@ class NIHSearch(object):
         buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:DisplayPaperSummary<CR>', opts)
         buf.api.set_keymap('n', '<Esc>', ':CloseActiveWindow<CR>', opts)
 
+    def ReturnCleanAbstractXml(self, xml):
+        abstract_text = 'No Abstract Found'
+        articles = xml.get("PubmedArticle", [])
+
+        if articles:
+            medline = articles[0].get("MedlineCitation", {})
+            article_info = medline.get("Article", {})
+            title = article_info.get("ArticleTitle", "No Title Found")
+    
+            abstract_dict = article_info.get("Abstract", {})
+            if abstract_dict:
+                fragments = abstract_dict.get("AbstractText", [])
+                abstract_text = " ".join(fragments)
+    
+        return abstract_text
 
     @pynvim.command("DisplayPaperSummary", sync=True)
     def DisplayPaperSummary(self):
@@ -46,13 +61,20 @@ class NIHSearch(object):
                     summaryBufHandle.options['modifiable'] = True
 
                     paper = self.sum[ind]
-                    title = paper.get('Title', 'No Title')
-                    authors = paper.get('AuthorList', 'Unknown')
-                    datePublished = paper.get("PubDate", "Unknown")
-                    journal = paper.get("FullJournalName", "Unknown")
-                    #abstract = pull full abstract
-                    comment = paper.get("Comment", "Unknown")
-                    note = paper.get("Note", "Unknown")
+                    title = paper.get('Title', 'N/A')
+                    authors = paper.get('AuthorList', 'N/A')
+                    datePublished = paper.get("PubDate", "N/A")
+                    journal = paper.get("FullJournalName", "N/A")
+
+                    # Abstract retrival and cleaning logic
+                    paper_id = paper.get('Id')
+                    paper_handle = Entrez.efetch(db='pubmed', id=paper_id, rettype="abstract", retmode="xml")
+                    uncleaned_abstract_xml = Entrez.read(paper_handle)
+                    paper_handle.close()
+                    abstract = self.ReturnCleanAbstractXml(uncleaned_abstract_xml)
+
+                    comment = paper.get("Comment", "N/A")
+                    note = paper.get("Note", "N/A")
 
                     lines = []
                     lines.append(f"## {title}")
@@ -64,7 +86,7 @@ class NIHSearch(object):
                     lines.append("")
                     lines.append("Abstract")
                     lines.append("---")
-                    lines.append("Unknown") # abstract
+                    lines.append(abstract) 
                     lines.append("")
                     lines.append("Comment")
                     lines.append("---")
@@ -98,10 +120,6 @@ class NIHSearch(object):
                     self.nvim.api.win_set_option(summaryWinHandle, 'wrap', True)
                     self.nvim.api.set_current_win(summaryWinHandle) 
 
-                    '''
-                    BUG:
-                        New window works as intended but is not overlayed over the query window like I would like it to be
-                    '''
             self.nvim.async_call(updateUI)
         except Exception as e:
             err_msg = str(e)
@@ -205,10 +223,10 @@ class NIHSearch(object):
 
                         for paper in summaries:
 
-                            title = paper.get('Title', 'No Title')
-                            authors = paper.get('AuthorList', 'Unknown')
-                            datePublished = paper.get("PubDate", "Unknown")
-                            journal = paper.get("FullJournalName", "Unknown")
+                            title = paper.get('Title', 'N/A')
+                            authors = paper.get('AuthorList', 'N/A')
+                            datePublished = paper.get("PubDate", "N/A")
+                            journal = paper.get("FullJournalName", "N/A")
 
                             lines.append(f"## {title}")
                             lines.append(f"**Date Published**: {datePublished}")
