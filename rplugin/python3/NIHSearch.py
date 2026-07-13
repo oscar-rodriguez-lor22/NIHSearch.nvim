@@ -1,5 +1,8 @@
 import pynvim
+import tempfile
+import requests
 import threading
+import pdfplumber
 from Bio import Entrez
 from pynvim.api import NvimError
 
@@ -7,8 +10,85 @@ from pynvim.api import NvimError
 class NIHSearch(object):
     def __init__(self, nvim):
         self.nvim = nvim
-        self.sum = ""
+        self.sum = []
+        self.active_sum = None
         Entrez.email = "NIHSearch@nvim.com"
+
+    #####################################################################################################################################
+
+    def IsResponsePdf(self, url):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/pdf",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        response = requests.get(url, headers=headers)
+        content_type = response.headers.get('Content-Type', '').lower()
+
+        if 'application/pdf' in content_type:
+            return True
+        
+        if response.content.startswith(b'%PDF'):
+            return True
+        
+        return False
+
+    def GetPaperUrl(self, doi):
+        url = f"https://api.unpaywall.org/v2/{doi}?email=nihsearch@nvim.com"
+        response = requests.get(url)
+    
+        if response.status_code != 200: 
+            return None 
+    
+        if response.json(): 
+            response = response.json()
+        else:
+            return None
+
+        if not response.get("is_oa"):
+            return None
+        
+        best_location = response.get("best_oa_location")
+        pdf_url = best_location.get("url_for_pdf")
+        if not pdf_url:
+            return None
+        
+        return pdf_url
+
+    def GetPdfData(self, pdf_url):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/pdf",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        response = requests.get(pdf_url, headers=headers)
+        pdf_data = response.content
+        return pdf_data
+
+    def FormatPdfData(self, pdf_data):
+        formated_pdf_data = None
+    
+        try:
+            with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
+                formated_pdf_data = []
+
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text(
+                        layout=False,         # Try False first, then True if needed
+                        x_tolerance=1.5,     # LOWER this number (default is 3). Forces spaces in smaller gaps.
+                        y_tolerance=3,       # Keeps rows from overlapping
+                        keep_blank_chars=True # Forces the engine to respect empty intervals
+                    )
+                    formated_pdf_data.append(text if text else "[No text]")
+        except:
+            print("PrintPdfData Exception: Make sure contrents are in pdf format")
+    
+        return formated_pdf_data
+    ###########################################################################################################################################3
 
     @pynvim.command("CloseActiveWindow", sync=True)
     def CloseActiveWindow(self):
@@ -18,11 +98,32 @@ class NIHSearch(object):
             self.nvim.api.win_close(currWin, False)
         except NvimError as e:
             self.nvim.async_call(lambda: self.nvim.err_write(f"Error closing window: {e}"))
+    
+    @pynvim.command("CloseActiveWindowAndResetActiveSum", sync=True)
+    def CloseActiveWindowAndResetActiveSum(self):
+        try:
+            currWin = self.nvim.api.get_current_win()
+            self.nvim.async_call(lambda: self.nvim.err_write(f"Active window handle just prior to close attempt: {currWin}"))
+            self.nvim.api.win_close(currWin, False)
+            self.active_sum = None
+        except NvimError as e:
+            self.nvim.async_call(lambda: self.nvim.err_write(f"Error closing window: {e}"))
 
-    def SetupMapping(self, buf):
+    def SearchMapping(self, buf):
         opts = {'noremap': True, 'silent': True}
         buf.api.set_keymap('n', '<CR>', ':DisplayPaperSummary<CR>', opts)
         buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:DisplayPaperSummary<CR>', opts)
+        buf.api.set_keymap('n', '<Esc>', ':CloseActiveWindow<CR>', opts)
+    
+    def SummaryMapping(self, buf):
+        opts = {'noremap': True, 'silent': True}
+        buf.api.set_keymap('n', '<CR>', ':DisplayPaper<CR>', opts)
+        buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:DisplayPaper<CR>', opts)
+        buf.api.set_keymap('n', '<Esc>', ':CloseActiveWindowAndResetActiveSum<CR>', opts)
+
+    def PaperPreviewMapping(self, buf):
+        opts = {'noremap': True, 'silent': True}
+        #buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:OpenPaperInNewWindow<CR>', opts)
         buf.api.set_keymap('n', '<Esc>', ':CloseActiveWindow<CR>', opts)
 
     def ReturnCleanAbstractXml(self, xml):
@@ -41,6 +142,73 @@ class NIHSearch(object):
     
         return abstract_text
 
+    @pynvim.command("DisplayPaper", sync=True)
+    def DisplayPaper(self):
+        try:
+            def updateUI():
+                valRow = 6
+                currBuf = self.nvim.api.get_current_buf()
+                currWin = self.nvim.api.get_current_win()
+                row, col = self.nvim.api.win_get_cursor(currWin)
+                if (row == valRow):
+                    # Will hold paper preview
+                    # Create new buffer
+                    paperPreviewBufHandle = self.nvim.api.create_buf(False, True)
+                    self.PaperPreviewMapping(paperPreviewBufHandle)
+                    paperPreviewBufHandle.options['buftype'] = 'nofile'
+                    paperPreviewBufHandle.options['bufhidden'] = 'wipe'
+                    paperPreviewBufHandle.options['filetype'] = 'markdown'
+                    paperPreviewBufHandle.options['modifiable'] = True
+
+                    # Put doi and name of paper in the new buffer
+                    title = self.active_sum.get("Title", "N/A")
+                    doi = self.active_sum.get("DOI", "N/A")
+                    lines = []
+                    # Sould display a loading screen
+                    lines.append(f"DOI: {doi}")
+                    lines.append("Pdf Contents:")
+                    lines.append("-------------------------------")
+
+                    ########################################################################################################################################
+                    paper_url = self.GetPaperUrl(doi)
+                    if paper_url:
+                        is_pdf = self.IsResponsePdf(paper_url)
+                        if is_pdf:
+                            pdf_data = self.GetPdfData(paper_url)
+                            formated_pdf_data = self.FormatPdfData(pdf_data)
+                            if formated_pdf_data is not None:
+                                lines.extend(formated_pdf_data)
+                    else:
+                        lines.append("Unable to retrieve paper")
+                    ###################################################################################               
+                    paperPreviewBufHandle[:] = lines
+                    paperPreviewBufHandle.options['modifiable'] = False
+
+                    # Create new window over other windows, fill this new window with paperPreviewBufHandle contents
+                    winWidth = self.nvim.options['columns']
+                    winHeight = self.nvim.options['lines']
+
+                    config = {
+                        'relative': 'editor',
+                        'row': int(winHeight / 4),
+                        'col': int(winWidth / 4),
+                        'width': int(winWidth / 2),
+                        'height': int(winHeight / 2),
+                        'border': 'rounded', 
+                        'anchor': 'NW',
+                        'style': 'minimal',
+                        'focusable': True,
+                    }
+                    self.nvim.command(':set linebreak')
+                    self.nvim.command(':set breakindent')
+                    paperPreviewWinHandle = self.nvim.api.open_win(paperPreviewBufHandle, True, config) # Keep this here, putting it within config dosent work
+                    self.nvim.api.win_set_option(paperPreviewWinHandle, 'wrap', True)
+                    self.nvim.api.set_current_win(paperPreviewWinHandle) 
+            self.nvim.async_call(updateUI)
+        except Exception as e:
+            err_msg = str(e)
+            self.nvim.async_call(lambda: self.nvim.err_write(f"Error: {err_msg}\n"))
+
     @pynvim.command("DisplayPaperSummary", sync=True)
     def DisplayPaperSummary(self):
         try:
@@ -51,30 +219,29 @@ class NIHSearch(object):
                 row, col = self.nvim.api.win_get_cursor(currWin)
                 if (row in valRow):
                     ind = valRow.index(row)
+                    self.active_sum = self.sum[ind]
 
-                    # create new buffer and fill it
                     summaryBufHandle = self.nvim.api.create_buf(False, True)
-                    self.SetupMapping(summaryBufHandle)
+                    self.SummaryMapping(summaryBufHandle)
                     summaryBufHandle.options['buftype'] = 'nofile'
                     summaryBufHandle.options['bufhidden'] = 'wipe'
                     summaryBufHandle.options['filetype'] = 'markdown'
                     summaryBufHandle.options['modifiable'] = True
 
-                    paper = self.sum[ind]
-                    title = paper.get('Title', 'N/A')
-                    authors = paper.get('AuthorList', 'N/A')
-                    datePublished = paper.get("PubDate", "N/A")
-                    journal = paper.get("FullJournalName", "N/A")
+                    title = self.active_sum.get('Title', 'N/A')
+                    authors = self.active_sum.get('AuthorList', 'N/A')
+                    datePublished = self.active_sum.get("PubDate", "N/A")
+                    journal = self.active_sum.get("FullJournalName", "N/A")
 
                     # Abstract retrival and cleaning logic
-                    paper_id = paper.get('Id')
+                    paper_id = self.active_sum.get('Id')
                     paper_handle = Entrez.efetch(db='pubmed', id=paper_id, rettype="abstract", retmode="xml")
                     uncleaned_abstract_xml = Entrez.read(paper_handle)
                     paper_handle.close()
                     abstract = self.ReturnCleanAbstractXml(uncleaned_abstract_xml)
 
-                    comment = paper.get("Comment", "N/A")
-                    note = paper.get("Note", "N/A")
+                    comment = self.active_sum.get("Comment", "N/A")
+                    note = self.active_sum.get("Note", "N/A")
 
                     lines = []
                     lines.append(f"## {title}")
@@ -195,7 +362,7 @@ class NIHSearch(object):
             def task():
                 try:
                     # Search for ID's
-                    search_handle = Entrez.esearch(db="pubmed", term=query, retmax=20)
+                    search_handle = Entrez.esearch(db="pubmed", term=query, retmax=100)
                     search_result = Entrez.read(search_handle)
                     ids = search_result.get("IdList", [])
                     search_handle.close()
@@ -214,7 +381,7 @@ class NIHSearch(object):
                     def updateUI():
 
                         queryBufHandle = self.nvim.api.create_buf(False, True)
-                        self.SetupMapping(queryBufHandle)
+                        self.SearchMapping(queryBufHandle)
                         queryBufHandle.options['buftype'] = 'nofile'
                         queryBufHandle.options['bufhidden'] = 'wipe'
                         queryBufHandle.options['filetype'] = 'markdown'
@@ -264,18 +431,3 @@ class NIHSearch(object):
                     self.nvim.async_call(lambda: self.nvim.err_write(f"Error: {err_msg}\n"))
 
             threading.Thread(target=task, daemon=True).start()
-
-	    ## Improvements
-            ## 2. Get rid of the self.sum property and pass the array as an arg to DisplayPaperSummary()
-            ## 3. Create an AbstractParser function. Use in DisplayPaperSummary() to display a papers abstract after using Entrez.efetch(db=arg, id=arg, retmode=arg)
-            ## 4. Implement loading screen while AbstractParser runs as Entrez.efetch() can take a few seconds
-
-	    ## On **View Full Text** Implementation
-	    ## 1. PMC papers can be downloaded in full as XML or PDF's. Try to parse the XML and display this in a new buffer.
-	    ## 2. Many other papers will be pdf only of paywalled + pdf. The easy option is to just add a link here that just opens in the users browser.
-	    	## Terminal/Vim only solutions include
-		## 1. Download the PDF's temporarily (if not paywalled) and use termpdf.py to draw the pdf onto a new terminal window.
-		## 2. Using pdftotext to get the PDF's text and load that into a buffer, will lose out on images tho :( 
-		## 3. Using telescopre-media-files.nvim to load the PDF into a floating window and prompting the user if they would like the paper to load in a new window.
-		## This last option renders the full PDF and dosent require losing out on the graphs an images but it does come with the dependecny overhead
-		## of the user now needing a compatible terminal, image.nvim, and Magick. Implementation would be quite easy as the plugins do most of the work. 
