@@ -1,10 +1,11 @@
+import json
 import pynvim
 import tempfile
 import requests
 import threading
-import pdfplumber
 from Bio import Entrez
 from pynvim.api import NvimError
+import xml.etree.ElementTree as ET
 
 @pynvim.plugin
 class NIHSearch(object):
@@ -164,23 +165,33 @@ class NIHSearch(object):
                     title = self.active_sum.get("Title", "N/A")
                     doi = self.active_sum.get("DOI", "N/A")
                     lines = []
-                    # Sould display a loading screen
                     lines.append(f"DOI: {doi}")
-                    lines.append("Pdf Contents:")
                     lines.append("-------------------------------")
 
-                    ########################################################################################################################################
-                    paper_url = self.GetPaperUrl(doi)
-                    if paper_url:
-                        is_pdf = self.IsResponsePdf(paper_url)
-                        if is_pdf:
-                            pdf_data = self.GetPdfData(paper_url)
-                            formated_pdf_data = self.FormatPdfData(pdf_data)
-                            if formated_pdf_data is not None:
-                                lines.extend(formated_pdf_data)
-                    else:
-                        lines.append("Unable to retrieve paper")
-                    ###################################################################################               
+                    paperId = self.active_sum.get("Id")
+
+                    try:
+                        fetch_handle = Entrez.efetch(db="pmc", id=paperId, retmode="xml")
+                        xml_data = fetch_handle.read()
+                        fetch_handle.close()
+                        root = ET.fromstring(xml_data)
+
+                        paragraphs = root.findall(".//body//p")
+
+                        if paragraphs:
+                            for p in paragraphs:
+                                text_content = "".join(p.itertext()).strip()
+                                
+                                if text_content:
+                                    for line in text_content.splitlines():
+                                        lines.append(line.rstrip())
+                                    lines.append("") # Section paragraph spacing
+                        else:
+                            lines.append("[Notice]: Full-text structural body paragraphs are unavailable for this PMC archive record.")
+
+                    except Exception as fetch_err:
+                        lines.append(f"[Error fetching structural XML payload]: {fetch_err}")
+
                     paperPreviewBufHandle[:] = lines
                     paperPreviewBufHandle.options['modifiable'] = False
 
@@ -213,7 +224,7 @@ class NIHSearch(object):
     def DisplayPaperSummary(self):
         try:
             def updateUI(): 
-                valRow = [i for i in range(8, 123, 6)]
+                valRow = [i for i in range(8, 1208, 6)]
                 currBuf = self.nvim.api.get_current_buf()
                 currWin = self.nvim.api.get_current_win()
                 row, col = self.nvim.api.win_get_cursor(currWin)
@@ -362,7 +373,7 @@ class NIHSearch(object):
             def task():
                 try:
                     # Search for ID's
-                    search_handle = Entrez.esearch(db="pubmed", term=query, retmax=100)
+                    search_handle = Entrez.esearch(db="pmc", term=query, retmax=100)
                     search_result = Entrez.read(search_handle)
                     ids = search_result.get("IdList", [])
                     search_handle.close()
@@ -372,7 +383,7 @@ class NIHSearch(object):
                         return
 
                     # Retrieve summaries using ID's
-                    summary_handle = Entrez.esummary(db="pubmed", id=",".join(ids))
+                    summary_handle = Entrez.esummary(db="pmc", id=",".join(ids))
                     summaries = Entrez.read(summary_handle)
                     self.sum = summaries
                     summary_handle.close()
