@@ -1,6 +1,11 @@
 biopython==1.86
+certifi==2026.6.17
+charset-normalizer==3.4.9
 greenlet==3.3.0
+idna==3.18
 msgpack==1.1.2
 numpy==2.4.1
 pynvim==0.6.0
+requests==2.34.2
 typing_extensions==4.15.0
+urllib3==2.7.0

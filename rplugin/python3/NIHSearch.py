@@ -1,11 +1,24 @@
+import os
+import sys
 import json
-import pynvim
-import tempfile
-import requests
 import threading
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+current_file = Path(__file__).resolve()
+
+plugin_root = current_file.parents[2] 
+deps_dir = plugin_root / "deps"
+
+if deps_dir.exists() and str(deps_dir) not in sys.path:
+    sys.path.insert(0, str(deps_dir))
+
+print(deps_dir)
+
+import requests
+import pynvim
 from Bio import Entrez
 from pynvim.api import NvimError
-import xml.etree.ElementTree as ET
 
 @pynvim.plugin
 class NIHSearch(object):
@@ -14,82 +27,6 @@ class NIHSearch(object):
         self.sum = []
         self.active_sum = None
         Entrez.email = "NIHSearch@nvim.com"
-
-    #####################################################################################################################################
-
-    def IsResponsePdf(self, url):
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/pdf",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        response = requests.get(url, headers=headers)
-        content_type = response.headers.get('Content-Type', '').lower()
-
-        if 'application/pdf' in content_type:
-            return True
-        
-        if response.content.startswith(b'%PDF'):
-            return True
-        
-        return False
-
-    def GetPaperUrl(self, doi):
-        url = f"https://api.unpaywall.org/v2/{doi}?email=nihsearch@nvim.com"
-        response = requests.get(url)
-    
-        if response.status_code != 200: 
-            return None 
-    
-        if response.json(): 
-            response = response.json()
-        else:
-            return None
-
-        if not response.get("is_oa"):
-            return None
-        
-        best_location = response.get("best_oa_location")
-        pdf_url = best_location.get("url_for_pdf")
-        if not pdf_url:
-            return None
-        
-        return pdf_url
-
-    def GetPdfData(self, pdf_url):
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/pdf",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        response = requests.get(pdf_url, headers=headers)
-        pdf_data = response.content
-        return pdf_data
-
-    def FormatPdfData(self, pdf_data):
-        formated_pdf_data = None
-    
-        try:
-            with pdfplumber.open(io.BytesIO(pdf_data)) as pdf:
-                formated_pdf_data = []
-
-                for i, page in enumerate(pdf.pages):
-                    text = page.extract_text(
-                        layout=False,         # Try False first, then True if needed
-                        x_tolerance=1.5,     # LOWER this number (default is 3). Forces spaces in smaller gaps.
-                        y_tolerance=3,       # Keeps rows from overlapping
-                        keep_blank_chars=True # Forces the engine to respect empty intervals
-                    )
-                    formated_pdf_data.append(text if text else "[No text]")
-        except:
-            print("PrintPdfData Exception: Make sure contrents are in pdf format")
-    
-        return formated_pdf_data
-    ###########################################################################################################################################3
 
     @pynvim.command("CloseActiveWindow", sync=True)
     def CloseActiveWindow(self):
@@ -110,6 +47,33 @@ class NIHSearch(object):
         except NvimError as e:
             self.nvim.async_call(lambda: self.nvim.err_write(f"Error closing window: {e}"))
 
+    @pynvim.command("OpenPaperInNewWindow", sync=True)
+    def OpenPaperInNewWindow(self):
+
+        win_handle = self.nvim.current.window.handle
+        buf_handle = self.nvim.current.buffer
+        self.nvim.command('vsplit')
+
+        try:
+            self.nvim.api.buf_del_keymap(buf_handle, 'n', '<CR>')
+            self.nvim.api.buf_del_keymap(buf_handle, 'n', '<LeftMouse>')
+            self.nvim.api.buf_del_keymap(buf_handle, 'n', '<Esc>')
+        except Exception as e:
+            err_msg = str(e)
+            self.nvim.async_call(lambda: self.nvim.err_write(f"Error: {err_msg}\n"))   
+        
+        try:
+            for win in self.nvim.windows:
+                config = self.nvim.api.win_get_config(win.handle)
+                if config.get('relative', '') != '':
+                    try:
+                        self.nvim.api.win_close(win.handle, True)  
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
     def SearchMapping(self, buf):
         opts = {'noremap': True, 'silent': True}
         buf.api.set_keymap('n', '<CR>', ':DisplayPaperSummary<CR>', opts)
@@ -124,7 +88,8 @@ class NIHSearch(object):
 
     def PaperPreviewMapping(self, buf):
         opts = {'noremap': True, 'silent': True}
-        #buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:OpenPaperInNewWindow<CR>', opts)
+        buf.api.set_keymap('n', '<LeftMouse>', '<LeftMouse>:OpenPaperInNewWindow<CR>', opts)
+        buf.api.set_keymap('n', '<CR>', ':OpenPaperInNewWindow<CR>', opts)
         buf.api.set_keymap('n', '<Esc>', ':CloseActiveWindow<CR>', opts)
 
     def ReturnCleanAbstractXml(self, xml):
